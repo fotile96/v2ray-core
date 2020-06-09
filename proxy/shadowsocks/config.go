@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/md5"
+	"crypto/rc4"
 	"crypto/sha1"
 	"io"
 
@@ -74,6 +75,8 @@ func (a *Account) getCipher() (Cipher, error) {
 			IVBytes:         32,
 			AEADAuthCreator: createChacha20Poly1305,
 		}, nil
+	case CipherType_RC4_MD5:
+		return &Rc4Md5{KeyBytes: 16}, nil
 	case CipherType_NONE:
 		return NoneCipher{}, nil
 	default:
@@ -259,6 +262,62 @@ func (v *ChaCha20) DecodePacket(key []byte, b *buf.Buffer) error {
 	}
 	iv := b.BytesTo(v.IVSize())
 	stream := crypto.NewChaCha20Stream(key, iv)
+	stream.XORKeyStream(b.BytesFrom(v.IVSize()), b.BytesFrom(v.IVSize()))
+	b.Advance(v.IVSize())
+	return nil
+}
+
+// Rc4Md5 represents all AES-CFB ciphers.
+type Rc4Md5 struct {
+	KeyBytes int32
+}
+
+func (*Rc4Md5) IsAEAD() bool {
+	return false
+}
+
+func (v *Rc4Md5) KeySize() int32 {
+	return v.KeyBytes
+}
+
+func (v *Rc4Md5) IVSize() int32 {
+	return 16
+}
+
+func (v *Rc4Md5) newStream(key []byte, iv []byte) cipher.Stream {
+	h := md5.New()
+	h.Write(key)
+	h.Write(iv)
+	rc4key := h.Sum(nil)
+	c, _ := rc4.NewCipher(rc4key)
+	return c
+}
+
+func (v *Rc4Md5) NewEncryptionWriter(key []byte, iv []byte, writer io.Writer) (buf.Writer, error) {
+	stream := v.newStream(key, iv)
+	return &buf.SequentialWriter{Writer: crypto.NewCryptionWriter(stream, writer)}, nil
+}
+
+func (v *Rc4Md5) NewDecryptionReader(key []byte, iv []byte, reader io.Reader) (buf.Reader, error) {
+	stream := v.newStream(key, iv)
+	return &buf.SingleReader{
+		Reader: crypto.NewCryptionReader(stream, reader),
+	}, nil
+}
+
+func (v *Rc4Md5) EncodePacket(key []byte, b *buf.Buffer) error {
+	iv := b.BytesTo(v.IVSize())
+	stream := v.newStream(key, iv)
+	stream.XORKeyStream(b.BytesFrom(v.IVSize()), b.BytesFrom(v.IVSize()))
+	return nil
+}
+
+func (v *Rc4Md5) DecodePacket(key []byte, b *buf.Buffer) error {
+	if b.Len() <= v.IVSize() {
+		return newError("insufficient data: ", b.Len())
+	}
+	iv := b.BytesTo(v.IVSize())
+	stream := v.newStream(key, iv)
 	stream.XORKeyStream(b.BytesFrom(v.IVSize()), b.BytesFrom(v.IVSize()))
 	b.Advance(v.IVSize())
 	return nil
